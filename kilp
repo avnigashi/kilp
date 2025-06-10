@@ -1,0 +1,349 @@
+#!/bin/bash
+
+# kilp - Kill processes by port or PID
+# Usage: kilp --port <port> | kilp --pid <pid> | kilp --name <process_name>
+
+VERSION="1.0.0"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Function to display help
+show_help() {
+    echo -e "${BLUE}kilp${NC} - Process Killer Tool v${VERSION}"
+    echo
+    echo "Usage:"
+    echo "  kilp --port <port>           Kill process using specified port"
+    echo "  kilp --pid <pid>             Kill process with specified PID"
+    echo "  kilp --name <process_name>   Kill processes by name"
+    echo "  kilp --help                  Show this help message"
+    echo "  kilp --version               Show version information"
+    echo
+    echo "Options:"
+    echo "  -f, --force                  Force kill (SIGKILL instead of SIGTERM)"
+    echo "  -y, --yes                    Skip confirmation prompt"
+    echo
+    echo "Examples:"
+    echo "  kilp --port 3001             Kill process using port 3001"
+    echo "  kilp --pid 3345              Kill process with PID 3345"
+    echo "  kilp --name node             Kill all processes named 'node'"
+    echo "  kilp --port 8080 --force     Force kill process on port 8080"
+    echo "  kilp --pid 1234 --yes        Kill PID 1234 without confirmation"
+}
+
+# Function to show version
+show_version() {
+    echo "kilp version ${VERSION}"
+}
+
+# Function to log messages
+log_info() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+log_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+log_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# Function to check if running as root for certain operations
+check_permissions() {
+    local pid=$1
+    local owner=$(ps -o user= -p "$pid" 2>/dev/null)
+    
+    if [[ -n "$owner" && "$owner" != "$(whoami)" && "$(whoami)" != "root" ]]; then
+        log_warning "Process $pid is owned by '$owner'. You may need sudo privileges."
+        return 1
+    fi
+    return 0
+}
+
+# Function to kill process by PID
+kill_by_pid() {
+    local pid=$1
+    local force=$2
+    local skip_confirm=$3
+    
+    if ! ps -p "$pid" > /dev/null 2>&1; then
+        log_error "Process with PID $pid not found"
+        return 1
+    fi
+    
+    # Get process information
+    local process_info=$(ps -p "$pid" -o pid,ppid,user,command --no-headers 2>/dev/null)
+    
+    if [[ -z "$process_info" ]]; then
+        log_error "Unable to get process information for PID $pid"
+        return 1
+    fi
+    
+    echo -e "${BLUE}Process found:${NC}"
+    echo "PID  PPID USER     COMMAND"
+    echo "$process_info"
+    echo
+    
+    if [[ "$skip_confirm" != "true" ]]; then
+        read -p "Are you sure you want to kill this process? (y/N): " confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            log_info "Operation cancelled"
+            return 0
+        fi
+    fi
+    
+    check_permissions "$pid"
+    
+    local signal="TERM"
+    if [[ "$force" == "true" ]]; then
+        signal="KILL"
+    fi
+    
+    if kill -"$signal" "$pid" 2>/dev/null; then
+        log_success "Process $pid killed successfully"
+        return 0
+    else
+        log_error "Failed to kill process $pid. Try with sudo or --force"
+        return 1
+    fi
+}
+
+# Function to kill process by port
+kill_by_port() {
+    local port=$1
+    local force=$2
+    local skip_confirm=$3
+    
+    # Find processes using the port
+    local pids=$(lsof -ti :"$port" 2>/dev/null)
+    
+    if [[ -z "$pids" ]]; then
+        log_error "No process found using port $port"
+        return 1
+    fi
+    
+    echo -e "${BLUE}Processes found using port $port:${NC}"
+    echo "PID  PPID USER     COMMAND"
+    
+    for pid in $pids; do
+        ps -p "$pid" -o pid,ppid,user,command --no-headers 2>/dev/null
+    done
+    echo
+    
+    if [[ "$skip_confirm" != "true" ]]; then
+        read -p "Are you sure you want to kill these processes? (y/N): " confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            log_info "Operation cancelled"
+            return 0
+        fi
+    fi
+    
+    local success_count=0
+    local total_count=0
+    
+    for pid in $pids; do
+        ((total_count++))
+        check_permissions "$pid"
+        
+        local signal="TERM"
+        if [[ "$force" == "true" ]]; then
+            signal="KILL"
+        fi
+        
+        if kill -"$signal" "$pid" 2>/dev/null; then
+            log_success "Process $pid killed successfully"
+            ((success_count++))
+        else
+            log_error "Failed to kill process $pid"
+        fi
+    done
+    
+    if [[ $success_count -eq $total_count ]]; then
+        log_success "All processes using port $port have been killed"
+        return 0
+    else
+        log_warning "$success_count out of $total_count processes killed successfully"
+        return 1
+    fi
+}
+
+# Function to kill process by name
+kill_by_name() {
+    local process_name=$1
+    local force=$2
+    local skip_confirm=$3
+    
+    # Find processes by name
+    local pids=$(pgrep -f "$process_name" 2>/dev/null)
+    
+    if [[ -z "$pids" ]]; then
+        log_error "No process found with name matching '$process_name'"
+        return 1
+    fi
+    
+    echo -e "${BLUE}Processes found matching '$process_name':${NC}"
+    echo "PID  PPID USER     COMMAND"
+    
+    for pid in $pids; do
+        ps -p "$pid" -o pid,ppid,user,command --no-headers 2>/dev/null
+    done
+    echo
+    
+    if [[ "$skip_confirm" != "true" ]]; then
+        read -p "Are you sure you want to kill these processes? (y/N): " confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            log_info "Operation cancelled"
+            return 0
+        fi
+    fi
+    
+    local success_count=0
+    local total_count=0
+    
+    for pid in $pids; do
+        ((total_count++))
+        check_permissions "$pid"
+        
+        local signal="TERM"
+        if [[ "$force" == "true" ]]; then
+            signal="KILL"
+        fi
+        
+        if kill -"$signal" "$pid" 2>/dev/null; then
+            log_success "Process $pid killed successfully"
+            ((success_count++))
+        else
+            log_error "Failed to kill process $pid"
+        fi
+    done
+    
+    if [[ $success_count -eq $total_count ]]; then
+        log_success "All processes matching '$process_name' have been killed"
+        return 0
+    else
+        log_warning "$success_count out of $total_count processes killed successfully"
+        return 1
+    fi
+}
+
+# Check if required tools are available
+check_dependencies() {
+    local missing_tools=()
+    
+    if ! command -v lsof >/dev/null 2>&1; then
+        missing_tools+=("lsof")
+    fi
+    
+    if ! command -v pgrep >/dev/null 2>&1; then
+        missing_tools+=("procps")
+    fi
+    
+    if [[ ${#missing_tools[@]} -gt 0 ]]; then
+        log_error "Missing required tools: ${missing_tools[*]}"
+        echo "Install them with: sudo apt-get install ${missing_tools[*]}"
+        exit 1
+    fi
+}
+
+# Main function
+main() {
+    local port=""
+    local pid=""
+    local process_name=""
+    local force=false
+    local skip_confirm=false
+    
+    # Check dependencies
+    check_dependencies
+    
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --port)
+                port="$2"
+                shift 2
+                ;;
+            --pid)
+                pid="$2"
+                shift 2
+                ;;
+            --name)
+                process_name="$2"
+                shift 2
+                ;;
+            -f|--force)
+                force=true
+                shift
+                ;;
+            -y|--yes)
+                skip_confirm=true
+                shift
+                ;;
+            --help|-h)
+                show_help
+                exit 0
+                ;;
+            --version|-v)
+                show_version
+                exit 0
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                echo "Use 'kilp --help' for usage information"
+                exit 1
+                ;;
+        esac
+    done
+    
+    # Validate arguments
+    local action_count=0
+    [[ -n "$port" ]] && ((action_count++))
+    [[ -n "$pid" ]] && ((action_count++))
+    [[ -n "$process_name" ]] && ((action_count++))
+    
+    if [[ $action_count -eq 0 ]]; then
+        log_error "No action specified"
+        echo "Use 'kilp --help' for usage information"
+        exit 1
+    elif [[ $action_count -gt 1 ]]; then
+        log_error "Only one action can be specified at a time"
+        exit 1
+    fi
+    
+    # Validate port number
+    if [[ -n "$port" ]]; then
+        if ! [[ "$port" =~ ^[0-9]+$ ]] || [[ "$port" -lt 1 ]] || [[ "$port" -gt 65535 ]]; then
+            log_error "Invalid port number: $port (must be 1-65535)"
+            exit 1
+        fi
+    fi
+    
+    # Validate PID
+    if [[ -n "$pid" ]]; then
+        if ! [[ "$pid" =~ ^[0-9]+$ ]] || [[ "$pid" -lt 1 ]]; then
+            log_error "Invalid PID: $pid (must be a positive integer)"
+            exit 1
+        fi
+    fi
+    
+    # Execute the appropriate action
+    if [[ -n "$port" ]]; then
+        kill_by_port "$port" "$force" "$skip_confirm"
+    elif [[ -n "$pid" ]]; then
+        kill_by_pid "$pid" "$force" "$skip_confirm"
+    elif [[ -n "$process_name" ]]; then
+        kill_by_name "$process_name" "$force" "$skip_confirm"
+    fi
+}
+
+# Run main function with all arguments
+main "$@"
